@@ -129,6 +129,7 @@ class Library:
 
             with cd(self.source_directory()):
                 try:
+                    project.setup()
                     project.configure(build_directory)
                     project.pre_build(build_directory)
                     project.build(build_directory)

@@ -28,12 +28,14 @@ from .cd import current_directory
 
 
 class Needy:
-    def __init__(self, path='.', parameters={}):
-        self.__path = path if os.path.isabs(path) else os.path.normpath(os.path.join(current_directory(), path))
+    def __init__(self, path='.', parameters={}, local_configuration=None):
+        self.__path = self.__normalize_path(path)
         self.__parameters = parameters
 
         self.__needs_file = self.find_needs_file(self.__path)
         self.__needs_directory = Needy.resolve_needs_directory(self.__path)
+
+        self.__local_configuration = local_configuration
 
         if self.__needs_file is None:
             raise RuntimeError('No needs file found in {}'.format(self.__path))
@@ -43,13 +45,38 @@ class Needy:
 
     @staticmethod
     def resolve_needs_directory(directory):
+        directory = Needy.__normalize_path(directory)
+
         ret = None
+        parent_needs = None
         while directory:
             if Needy.find_needs_file(directory):
-                ret = os.path.join(directory, 'needs')
+                if ret is None:
+                    ret = os.path.join(directory, 'needs')
+                else:
+                    parent_needs = os.path.join(directory, 'needs')
+                    break
             directory = os.path.dirname(directory)
             if directory == os.sep:
                 break
+
+        if ret is None:
+            return None
+
+        if parent_needs:
+            real_needs_directory = os.path.dirname(ret)
+            while real_needs_directory != '/':
+                split = os.path.split(real_needs_directory)
+                if split[0] == parent_needs:
+                    real_needs_directory = os.path.join(real_needs_directory, 'needs')
+                    break
+                real_needs_directory = split[0]
+            if real_needs_directory != '/':
+                if not os.path.isdir(real_needs_directory):
+                    os.makedirs(real_needs_directory)
+                if not os.path.exists(ret):
+                    os.symlink(real_needs_directory, ret)
+
         return ret
 
     def path(self):
@@ -60,6 +87,7 @@ class Needy:
 
     @staticmethod
     def find_needs_file(directory):
+        directory = Needy.__normalize_path(directory)
         ret = None
         for name in ['needs.json', 'needs.yaml']:
             path = os.path.join(directory, name)
@@ -68,6 +96,18 @@ class Needy:
                     raise RuntimeError('More than one needs file is present.')
                 ret = path
         return ret
+
+    def set_development_mode(self, library_name, enable=True):
+        if not os.path.isdir(os.path.join(self.__needs_directory, library_name)):
+            raise RuntimeError('Please build the library once before enabling development mode.')
+
+        was_already = self.__local_configuration.development_mode(library_name) == enable
+        self.__local_configuration.set_development_mode(library_name, enable)
+
+        if enable:
+            print('Development mode {}enabled for {}: {}'.format('already ' if was_already else '', library_name, self.source_directory(library_name)))
+        else:
+            print('Development mode {}disabled for {}. Please ensure that you have persisted any changes you wish to keep.'.format('already ' if was_already else '', library_name))
 
     def needs_configuration(self, target=None):
         configuration = ''
@@ -167,7 +207,8 @@ class Needy:
         while len(names):
             name = names.pop()
             directory = os.path.join(self.__needs_directory, name)
-            library = Library(target, needs_configuration['libraries'][name], directory, self)
+            development_mode = self.__local_configuration and self.__local_configuration.development_mode(name)
+            library = Library(target, needs_configuration['libraries'][name], directory, self, development_mode=development_mode)
             libraries[name] = library
             if 'dependencies' not in library.configuration():
                 graph[name] = set()
@@ -271,6 +312,9 @@ class Needy:
         b = UniversalBinary(target_or_universal_binary, [l], self)
         return b.build_directory()
 
+    def source_directory(self, library_name):
+        return os.path.join(self.__needs_directory, library_name, 'source')
+
     def satisfy_target(self, target, filters=None):
         needs_configuration = self.needs_configuration(target)
 
@@ -325,6 +369,10 @@ class Needy:
             self.__print_status(Fore.RED, 'ERROR')
             print(e)
             raise
+
+    @staticmethod
+    def __normalize_path(path):
+        return path if os.path.isabs(path) else os.path.normpath(os.path.join(current_directory(), path))
 
     def __print_status(self, color, status, name=None):
         print(color + Style.BRIGHT + '[' + status + ']' + Style.RESET_ALL + Fore.RESET + (' %s' % name if name else ''))

@@ -1,10 +1,6 @@
 .DS_Store
-.needy_lock
 *.pyc
 needs/
 build/
 dist/
 *.egg-info/
-
-example/client/client
-example/server/server

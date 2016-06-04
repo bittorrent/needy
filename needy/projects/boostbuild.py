@@ -13,14 +13,15 @@ class BoostBuildProject(project.Project):
 
     @staticmethod
     def is_valid_project(definition, needy):
-        if not os.path.isfile('Jamroot'):
-            return False
+        return os.path.isfile('Jamroot')
 
-        return (os.path.isfile('b2') or os.path.isfile('bootstrap.sh')) or distutils.spawn.find_executable('b2') is not None
+    @staticmethod
+    def missing_prerequisites(definition, needy):
+        return ['b2'] if not os.path.isfile('bootstrap.sh') and distutils.spawn.find_executable('b2') is None else []
 
     @staticmethod
     def configuration_keys():
-        return project.Project.configuration_keys() | {'b2-args', 'linkage'}
+        return project.Project.configuration_keys() | {'b2-args', 'bootstrap-args'}
 
     def get_build_concurrency_args(self):
         concurrency = self.build_concurrency()
@@ -30,6 +31,15 @@ class BoostBuildProject(project.Project):
         elif concurrency == 0:
             return ['-j']
         return []
+
+    def configure(self, build_directory):
+        bootstrap_args = self.evaluate(self.configuration('bootstrap-args'))
+        if not os.path.isfile('bootstrap.sh'):
+            if len(bootstrap_args) > 0:
+                raise RuntimeError('bootstrap-args was given, but no bootstrap script is present')
+            return
+
+        self.command(['./bootstrap.sh'] + bootstrap_args, use_target_overrides=False)
 
     def build(self, output_directory):
         b2 = './b2' if os.path.isfile('b2') else 'b2'
@@ -44,19 +54,17 @@ class BoostBuildProject(project.Project):
         elif self.target().platform == 'android':
             b2_args.append('target-os=android')
 
-        if self.configuration('linkage') in ['static']:
-            b2_args.append('link=static')
-        elif self.configuration('linkage') in ['dynamic', 'shared']:
-            b2_args.append('link=shared')
-
-        toolset = 'clang' if distutils.spawn.find_executable('clang') is not None else 'gcc'
+        toolset = 'darwin' if sys.platform == 'darwin' else ('clang' if distutils.spawn.find_executable('clang') is not None else 'gcc')
         b2_args.append('toolset={}-needy'.format(toolset))
 
-        project_config = "import os ;\nusing {} : needy : [ os.environ CC ] ;\n".format(toolset)
+        project_config = ''
         if os.path.exists('project-config.jam'):
             with open('project-config.jam', 'r') as f:
-                project_config += f.read()
-        with open('project-config.jam', 'w') as f:
-            f.write(project_config)
+                project_config = f.read()
+
+        if ' : needy : [ os.environ CC ] ;' not in project_config:
+            project_config = "import os ;\nusing {} : needy : [ os.environ CC ] ;\n".format(toolset) + project_config
+            with open('project-config.jam', 'w') as f:
+                f.write(project_config)
 
         self.command([b2, 'install', '--prefix={}'.format(output_directory)] + b2_args)

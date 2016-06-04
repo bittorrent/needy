@@ -39,11 +39,12 @@ from .projects.xcode import XcodeProject
 
 
 class Library:
-    def __init__(self, target, configuration, directory, needy):
+    def __init__(self, target, configuration, directory, needy, development_mode=False):
         self.__target = target
         self.__configuration = configuration
         self.__directory = directory
         self.needy = needy
+        self.__development_mode = development_mode
 
     def configuration(self):
         return self.__configuration
@@ -53,10 +54,6 @@ class Library:
 
     def project_configuration(self):
         return evaluate_conditionals(self.__configuration['project'] if 'project' in self.__configuration else dict(), self.target())
-
-    def should_build(self):
-        configuration = self.project_configuration()
-        return 'build' not in configuration or configuration['build']
 
     def string_format_variables(self):
         return {
@@ -69,7 +66,7 @@ class Library:
     @staticmethod
     def additional_project_configuration_keys():
         """ the configuration keys that we handle here instead of in Project classes (usually because we need them before determining the project type) """
-        return {'post-clean', 'environment', 'type', 'build'}
+        return {'post-clean', 'environment', 'type', 'root'}
 
     def evaluate(self, str_or_list, **kwargs):
         l = [] if not str_or_list else (str_or_list if isinstance(str_or_list, list) else [str_or_list])
@@ -77,26 +74,27 @@ class Library:
         variables.update(kwargs)
         return [str.format(**variables) for str in l]
 
-    def build(self):
-        if not self.should_build():
-            return False
+    def clean_source(self):
+        if 'download' in self.__configuration:
+            source = Download(self.__configuration['download'], self.__configuration['checksum'], self.source_directory(), os.path.join(self.directory(), 'download'))
+        elif 'repository' in self.__configuration:
+            source = GitRepository(self.__configuration['repository'], self.__configuration['commit'], self.source_directory())
+        elif 'directory' in self.__configuration:
+            source = Directory(self.__configuration['directory'] if os.path.isabs(self.__configuration['directory']) else os.path.join(needy.path(), self.__configuration['directory']), self.source_directory())
+        else:
+            raise ValueError('no source specified in configuration')
 
+        source.clean()
+
+    def build(self):
         print('Building for %s %s' % (self.target().platform.identifier(), self.target().architecture))
 
         if ' ' in self.__directory:
             print(Fore.YELLOW + '[WARNING]' + Fore.RESET + ' The build path contains spaces. Some build systems don\'t '
                   'handle spaces well, so if you have problems, consider moving the project or using a symlink.')
 
-        if 'download' in self.__configuration:
-            self.source = Download(self.__configuration['download'], self.__configuration['checksum'], self.source_directory(), os.path.join(self.directory(), 'download'))
-        elif 'repository' in self.__configuration:
-            self.source = GitRepository(self.__configuration['repository'], self.__configuration['commit'], self.source_directory())
-        elif 'directory' in self.__configuration:
-            self.source = Directory(self.__configuration['directory'] if os.path.isabs(self.__configuration['directory']) else os.path.join(needy.path(), self.__configuration['directory']), self.source_directory())
-        else:
-            raise ValueError('no source specified in configuration')
-
-        self.source.clean()
+        if not self.__development_mode:
+            self.clean_source()
 
         configuration = self.project_configuration()
         env_overrides = self.__parse_env_overrides(configuration['environment'] if 'environment' in configuration else None)
@@ -104,11 +102,11 @@ class Library:
         self.__log_env_overrides(env_overrides)
         with OverrideEnvironment(env_overrides):
             post_clean_commands = configuration['post-clean'] if 'post-clean' in configuration else []
-            with cd(self.source_directory()):
+            with cd(self.project_root()):
                 for cmd in self.evaluate(post_clean_commands):
                     command(cmd)
 
-            definition = ProjectDefinition(self.target(), self.source_directory(), configuration)
+            definition = ProjectDefinition(self.target(), self.project_root(), configuration)
             project = self.project(definition)
 
             unrecognized_configuration_keys = set(configuration.keys()) - project.configuration_keys() - self.additional_project_configuration_keys()
@@ -127,7 +125,7 @@ class Library:
 
             os.makedirs(build_directory)
 
-            with cd(self.source_directory()):
+            with cd(self.project_root()):
                 try:
                     project.setup()
                     project.configure(build_directory)
@@ -161,11 +159,7 @@ class Library:
                 logging.log(verbosity, '{}={}'.format(k, v))
 
     def has_up_to_date_build(self):
-        if self.needy.parameters().force_build:
-            return False
-        if not self.should_build():
-            return True
-        if not os.path.isfile(self.build_status_path()):
+        if self.needy.parameters().force_build or not os.path.isfile(self.build_status_path()) or self.__development_mode:
             return False
         with open(self.build_status_path(), 'r') as status_file:
             status_text = status_file.read()
@@ -188,6 +182,10 @@ class Library:
     def source_directory(self):
         return os.path.join(self.__directory, 'source')
 
+    def project_root(self):
+        configuration = self.project_configuration()
+        return os.path.join(self.source_directory(), configuration['root']) if 'root' in configuration else self.source_directory()
+
     def include_path(self):
         return os.path.join(self.build_directory(), 'include')
 
@@ -200,6 +198,9 @@ class Library:
         if 'type' in definition.configuration:
             for candidate in candidates:
                 if candidate.identifier() == definition.configuration['type']:
+                    missing_prerequisites = candidate.missing_prerequisites(definition, self.needy)
+                    if len(missing_prerequisites) > 0:
+                        raise RuntimeError('missing prerequisites for explicit project type: {}'.format(', '.join(missing_prerequisites)))
                     return candidate(definition, self.needy)
             raise RuntimeError('unknown project type')
 
@@ -208,8 +209,13 @@ class Library:
 
         with cd(definition.directory):
             for candidate in candidates:
-                if candidate.is_valid_project(definition, self.needy):
-                    return candidate(definition, self.needy)
+                if not candidate.is_valid_project(definition, self.needy):
+                    continue
+                missing_prerequisites = candidate.missing_prerequisites(definition, self.needy)
+                if len(missing_prerequisites) > 0:
+                    print(Fore.YELLOW + '[WARNING]' + Fore.RESET + ' Detected {} project, but the following prerequisites are missing: {}'.format(candidate.identifier(), ', '.join(missing_prerequisites)))
+                    continue
+                return candidate(definition, self.needy)
 
         raise RuntimeError('unknown project type')
 

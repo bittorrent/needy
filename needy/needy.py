@@ -215,9 +215,8 @@ class Needy:
 
         while len(names):
             name = names.pop()
-            directory = os.path.join(self.__needs_directory, name)
             development_mode = self.__local_configuration and self.__local_configuration.development_mode(name)
-            library = Library(target, needs_configuration['libraries'][name], directory, self, development_mode=development_mode)
+            library = Library(self, name, target=target, configuration=needs_configuration['libraries'][name], development_mode=development_mode)
             libraries[name] = library
             if 'dependencies' not in library.configuration():
                 graph[name] = set()
@@ -295,7 +294,7 @@ class Needy:
                 ret.append(ub.include_path())
             needy = self.recursive(libraries[0].source_directory())
             if needy:
-                ret.extend(needy.include_paths(target))
+                ret.extend(needy.include_paths(target_or_universal_binary))
         return ret
 
     def library_paths(self, target_or_universal_binary, filters=None):
@@ -309,15 +308,20 @@ class Needy:
                 ret.append(ub.library_path())
             needy = self.recursive(libraries[0].source_directory())
             if needy:
-                ret.extend(needy.library_paths(target))
+                ret.extend(needy.library_paths(target_or_universal_binary))
         return ret
 
+    def pkg_config_path(self, target_or_universal_binary, filters=None):
+        return ':'.join(self.pkg_config_paths(target_or_universal_binary, filters))
+
+    def pkg_config_paths(self, target_or_universal_binary, filters=None):
+        return [os.path.join(path, 'pkgconfig') for path in self.library_paths(target_or_universal_binary, filters)]
+
     def build_directory(self, library, target_or_universal_binary):
-        directory = os.path.join(self.__needs_directory, library)
         if isinstance(target_or_universal_binary, Target):
-            l = Library(target_or_universal_binary, None, directory, self)
+            l = Library(self, library, target=target_or_universal_binary)
             return l.build_directory()
-        l = Library(None, None, directory, self)
+        l = Library(self, library)
         b = UniversalBinary(target_or_universal_binary, [l], self)
         return b.build_directory()
 

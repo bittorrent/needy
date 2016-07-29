@@ -2,6 +2,7 @@ from ..platform import Platform
 
 import hashlib
 import os
+import subprocess
 
 
 class AndroidPlatform(Platform):
@@ -26,24 +27,41 @@ class AndroidPlatform(Platform):
         hash.update(self.__compiler_args(architecture))
         return hash.digest()
 
-    def toolchain(self, architecture):
-        if architecture.find('arm') >= 0:
-            return 'arm-linux-androideabi-4.9'
+    def toolchain_path(self, architecture):
+        if self.__toolchain:
+            return self.__toolchain
+
+        try:
+            which = subprocess.check_output(['which', '{}-c++'.format(self.binary_prefix(architecture))])
+            return os.path.dirname(os.path.dirname(which))
+        except subprocess.CalledProcessError:
+            pass
+
+        toolchain = None
+        if 'arm' in architecture:
+            toolchain = 'arm-linux-androideabi-4.9'
         else:
             raise ValueError('unsupported architecture')
 
-    def toolchain_path(self, architecture):
-        path = self.__toolchain or os.path.join(self.ndk_home(), 'toolchains', self.toolchain(architecture), 'prebuilt', 'darwin-x86_64')
+        path = os.path.join(self.ndk_home(), 'toolchains', toolchain, 'prebuilt')
         if not os.path.exists(path):
-            raise ValueError('missing toolchain: %s' % path)
-        return path
+            raise ValueError('missing toolchain: {}'.format(path))
+
+        prebuilts = os.listdir(path)
+        if len(prebuilts) > 0:
+            return os.path.join(path, prebuilts[0])
+
+        raise ValueError('missing toolchain: {}'.format(path))
 
     def sysroot_path(self, architecture):
+        if self.api_level is None:
+            return os.path.join(self.toolchain_path(architecture), 'sysroot')
+
         arch_directory = None
 
         if architecture == 'arm64':
             arch_directory = 'arch-arm64'
-        elif architecture.find('arm') >= 0:
+        elif 'arm' in architecture:
             arch_directory = 'arch-arm'
         else:
             raise ValueError('unsupported architecture')
@@ -56,7 +74,7 @@ class AndroidPlatform(Platform):
         raise ValueError('unsupported architecture')
 
     def binary_prefix(self, architecture):
-        if architecture.find('arm') >= 0:
+        if 'arm' in architecture:
             return 'arm-linux-androideabi'
         raise ValueError('unsupported architecture')
 
@@ -97,7 +115,7 @@ class AndroidPlatform(Platform):
         if self.api_level:
             ret.append('--sysroot=%s' % self.sysroot_path(architecture))
 
-        if architecture.find('arm') >= 0:
+        if 'arm' in architecture:
             if architecture == 'armv7':
                 ret.append('-march=armv7-a')
             else:
@@ -110,12 +128,17 @@ class AndroidPlatform(Platform):
         return ' '.join(ret)
 
     def c_compiler(self, architecture):
-        exe = 'gcc' if self.__runtime == 'gnustl_shared' else 'clang'
-        return 'arm-linux-androideabi-{} {}'.format(exe, self.__compiler_args(architecture))
+        return self.__compiler(architecture, ['clang', 'gcc'])
 
     def cxx_compiler(self, architecture):
-        exe = 'g++' if self.__runtime == 'gnustl_shared' else 'clang++'
-        return 'arm-linux-androideabi-{} {}'.format(exe, self.__compiler_args(architecture))
+        return self.__compiler(architecture, ['clang++', 'g++'])
+
+    def __compiler(self, architecture, choices):
+        prefix = self.binary_prefix(architecture)
+        for compiler in ['{}-{}'.format(prefix, c) for c in choices]:
+            if os.path.exists(os.path.join(self.toolchain_path(architecture), 'bin', compiler)):
+                return '{} {}'.format(compiler, self.__compiler_args(architecture))
+        raise RuntimeError('Unable to locate a suitable compiler matching {} in {}'.format(choices, os.path.join(self.toolchain_path(architecture), 'bin')))
 
     def ndk_home(self):
         ndk_home = os.getenv('ANDROID_NDK_HOME', os.getenv('NDK_HOME'))

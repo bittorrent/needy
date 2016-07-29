@@ -37,6 +37,10 @@ class UniversalBinary:
         if not os.path.isfile(self.build_status_path()):
             return False
 
+        for library in self.libraries():
+            if library.is_in_development_mode():
+                return False
+
         with open(self.build_status_path(), 'r') as status_file:
             status_text = status_file.read()
             if not status_text.strip():
@@ -110,8 +114,12 @@ class UniversalBinary:
                         if not macro:
                             header_contents = ''
                             break
-                        header_path = os.path.relpath(header, os.path.dirname(output_path))
-                        header_contents += '#if {}\n#include "{}"\n#endif\n'.format(macro, header_path)
+                        header_directory = os.path.join(os.path.dirname(output_path), 'needy_targets', library.target().platform.identifier(), library.target().architecture)
+                        if not os.path.exists(header_directory):
+                            os.makedirs(header_directory)
+                        header_path = os.path.join(header_directory, os.path.basename(header))
+                        shutil.copyfile(header, header_path)
+                        header_contents += '#if {}\n#include "{}"\n#endif\n'.format(macro, os.path.relpath(header_path, os.path.dirname(output_path)))
                     if header_contents:
                         print('Creating universal header %s' % path)
                         with open(output_path, 'w') as f:
@@ -137,7 +145,7 @@ class UniversalBinary:
 
         with open(self.build_status_path(), 'w') as status_file:
             status = {
-                'configuration': binascii.hexlify(self.configuration_hash())
+                'configuration': binascii.hexlify(self.configuration_hash()).decode()
             }
             json.dump(status, status_file)
 

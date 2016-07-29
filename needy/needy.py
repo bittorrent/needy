@@ -25,10 +25,11 @@ from .platform import available_platforms, host_platform
 from .generator import available_generators
 from .target import Target
 from .cd import current_directory
+from .needy_configuration import NeedyConfiguration
 
 
 class Needy:
-    def __init__(self, path='.', parameters={}, local_configuration=None):
+    def __init__(self, path='.', parameters={}, local_configuration=None, needy_configuration=None):
         self.__path = self.__normalize_path(path)
         self.__parameters = parameters
 
@@ -39,6 +40,8 @@ class Needy:
 
         if self.__needs_file is None:
             raise RuntimeError('No needs file found in {}'.format(self.__path))
+
+        self.__needy_configuration = needy_configuration
 
         logging.debug('Using needs file {}'.format(self.__needs_file))
         logging.debug('Using needs directory {}'.format(self.__needs_directory))
@@ -56,9 +59,11 @@ class Needy:
                 else:
                     parent_needs = os.path.join(directory, 'needs')
                     break
-            directory = os.path.dirname(directory)
-            if directory == os.sep:
+
+            parent = os.path.dirname(directory)
+            if directory == os.sep or directory == parent:
                 break
+            directory = parent
 
         if ret is None:
             return None
@@ -112,6 +117,10 @@ class Needy:
         else:
             print('Development mode {}disabled for {}. Please ensure that you have persisted any changes you wish to keep.'.format('already ' if was_already else '', library_name))
 
+    def needy_configuration(self):
+        '''Not to be confused with needs_configuration'''
+        return self.__needy_configuration
+
     def needs_configuration(self, target=None):
         configuration = ''
         with open(self.needs_file(), 'r') as needs_file:
@@ -134,7 +143,7 @@ class Needy:
                 host_platform=host_platform().identifier(),
                 needs_file=self.needs_file(),
                 needs_directory=self.needs_directory(),
-                build_directory=lambda library: self.build_directory(library, target) if target else None
+                build_directory=lambda library, target_override=None: self.build_directory(library, self.target(target_override) if target_override else target) if target else None
             )
         except ImportError:
             if re.compile('{%.*%}').search(configuration) or re.compile('{{.*}}').search(configuration) or re.compile('{#.*#}').search(configuration):
@@ -188,8 +197,12 @@ class Needy:
         platform = self.platform(parts[0])
         return Target(platform, parts[1] if len(parts) > 1 else platform.default_architecture())
 
-    def recursive(self, path):
-        return Needy(path, self.parameters()) if self.find_needs_file(path) else None
+    @classmethod
+    def test_filters(cls, name, filters):
+        for filter in filters:
+            if fnmatch.fnmatchcase(name, filter):
+                return True
+        return False
 
     def libraries_to_build(self, target, filters=None):
         needs_configuration = self.needs_configuration(target)
@@ -200,14 +213,8 @@ class Needy:
         names = []
 
         for name, library_configuration in needs_configuration['libraries'].items():
-            if filters:
-                match = False
-                for filter in filters:
-                    if fnmatch.fnmatchcase(name, filter):
-                        match = True
-                        break
-                if not match:
-                    continue
+            if filters and not self.test_filters(name, filters):
+                continue
             names.append(name)
 
         graph = {}
@@ -216,13 +223,16 @@ class Needy:
         while len(names):
             name = names.pop()
             development_mode = self.__local_configuration and self.__local_configuration.development_mode(name)
-            library = Library(self, name, target=target, configuration=needs_configuration['libraries'][name], development_mode=development_mode)
+            library = Library(self, name,
+                              target=target,
+                              configuration=needs_configuration['libraries'][name],
+                              development_mode=development_mode,
+                              build_caches=self.needy_configuration().build_caches())
             libraries[name] = library
             if 'dependencies' not in library.configuration():
                 graph[name] = set()
                 continue
-            str_or_list = library.configuration()['dependencies']
-            dependencies = str_or_list if isinstance(str_or_list, list) else [str_or_list]
+            dependencies = library.dependencies()
             graph[name] = set(dependencies)
             for dependency in dependencies:
                 if dependency not in graph:
@@ -292,9 +302,6 @@ class Needy:
             else:
                 ub = UniversalBinary(target_or_universal_binary, libraries, self)
                 ret.append(ub.include_path())
-            needy = self.recursive(libraries[0].source_directory())
-            if needy:
-                ret.extend(needy.include_paths(target_or_universal_binary))
         return ret
 
     def library_paths(self, target_or_universal_binary, filters=None):
@@ -306,9 +313,6 @@ class Needy:
             else:
                 ub = UniversalBinary(target_or_universal_binary, libraries, self)
                 ret.append(ub.library_path())
-            needy = self.recursive(libraries[0].source_directory())
-            if needy:
-                ret.extend(needy.library_paths(target_or_universal_binary))
         return ret
 
     def pkg_config_path(self, target_or_universal_binary, filters=None):
@@ -371,6 +375,8 @@ class Needy:
                             self.__print_status(Fore.GREEN, 'SUCCESS', name)
 
             for name, libs in libraries.items():
+                if filters and not self.test_filters(name, filters):
+                    continue
                 binary = UniversalBinary(universal_binary, libs, self)
                 if binary.is_up_to_date():
                     self.__print_status(Fore.GREEN, 'UP-TO-DATE', name)

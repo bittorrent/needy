@@ -8,6 +8,8 @@ import textwrap
 
 from operator import itemgetter
 
+from .cache import KeyLocked
+
 try:
     from colorama import Fore
 except ImportError:
@@ -26,6 +28,8 @@ from .sources.git import GitRepository
 from .cd import cd
 from .override_environment import OverrideEnvironment
 from .target import Target
+from .filesystem import clean_directory
+from .build_cache import BuildCache
 
 from .process import command
 
@@ -40,13 +44,14 @@ from .projects.xcode import XcodeProject
 
 
 class Library:
-    def __init__(self, needy, name, target=None, configuration=None, development_mode=False):
+    def __init__(self, needy, name, target=None, configuration=None, development_mode=False, build_caches=[]):
         self.needy = needy
         self.__name = name
         self.__target = target
         self.__configuration = configuration
         self.__directory = os.path.join(needy.needs_directory(), name)
         self.__development_mode = development_mode
+        self.__build_caches = build_caches
 
     def configuration(self):
         return self.__configuration
@@ -59,6 +64,10 @@ class Library:
 
     def project_configuration(self):
         return evaluate_conditionals(self.__configuration['project'] if 'project' in self.__configuration else dict(), self.target())
+
+    def dependencies(self):
+        str_or_list = self.configuration().get('dependencies', [])
+        return str_or_list if isinstance(str_or_list, list) else [str_or_list]
 
     def string_format_variables(self):
         return {
@@ -85,7 +94,7 @@ class Library:
         elif 'repository' in self.__configuration:
             source = GitRepository(self.__configuration['repository'], self.__configuration['commit'], self.source_directory())
         elif 'directory' in self.__configuration:
-            source = Directory(self.__configuration['directory'] if os.path.isabs(self.__configuration['directory']) else os.path.join(needy.path(), self.__configuration['directory']), self.source_directory())
+            source = Directory(self.__configuration['directory'] if os.path.isabs(self.__configuration['directory']) else os.path.join(self.needy.path(), self.__configuration['directory']), self.source_directory())
         else:
             raise ValueError('no source specified in configuration')
 
@@ -98,21 +107,27 @@ class Library:
             print(Fore.YELLOW + '[WARNING]' + Fore.RESET + ' The build path contains spaces. Some build systems don\'t '
                   'handle spaces well, so if you have problems, consider moving the project or using a symlink.')
 
-        if not self.__development_mode:
+        if not self.needy.parameters().force_build and not self.is_in_development_mode():
+            if self.__load_cached_artifacts():
+                return True
+
+        if not self.is_in_development_mode():
             self.clean_source()
 
         configuration = self.project_configuration()
         env_overrides = self.__parse_env_overrides(configuration['environment'] if 'environment' in configuration else None)
-
         self.__log_env_overrides(env_overrides)
-        with OverrideEnvironment(env_overrides):
-            post_clean_commands = configuration['post-clean'] if 'post-clean' in configuration else []
-            with cd(self.project_root()):
-                for cmd in self.evaluate(post_clean_commands):
-                    command(cmd)
 
-            definition = ProjectDefinition(self.target(), self.project_root(), configuration)
-            project = self.project(definition)
+        pkg_config_path = env_overrides['PKG_CONFIG_PATH'] if 'PKG_CONFIG_PATH' in env_overrides else os.environ.get('PKG_CONFIG_PATH', '')
+        dependency_config_path = self.needy.pkg_config_path(self.target(), self.dependencies())
+        env_overrides['PKG_CONFIG_PATH'] = (dependency_config_path + ':' + pkg_config_path) if pkg_config_path and dependency_config_path else dependency_config_path
+
+        with OverrideEnvironment(env_overrides):
+            self.__post_clean()
+
+            project = self.project(ProjectDefinition(self.target(), self.project_root(), configuration))
+            if not project:
+                raise RuntimeError('unknown project type')
 
             unrecognized_configuration_keys = set(configuration.keys()) - project.configuration_keys() - self.additional_project_configuration_keys()
             if len(unrecognized_configuration_keys):
@@ -120,36 +135,64 @@ class Library:
 
             project.set_string_format_variables(**self.string_format_variables())
 
-            if not project:
-                raise RuntimeError('unknown project type')
+            clean_directory(self.build_directory())
 
-            build_directory = self.build_directory()
-
-            if os.path.exists(build_directory):
-                shutil.rmtree(build_directory)
-
-            os.makedirs(build_directory)
-
-            with cd(self.project_root()):
-                try:
-                    project.setup()
-                    project.configure(build_directory)
-                    project.pre_build(build_directory)
-                    project.build(build_directory)
-                    project.post_build(build_directory)
-                    if not os.path.exists(os.path.join(build_directory, 'lib', 'pkgconfig')):
-                        self.generate_pkgconfig(build_directory, self.name())
-                except:
-                    shutil.rmtree(build_directory)
-                    raise
-
-            with open(self.build_status_path(), 'w') as status_file:
-                status = {
-                    'configuration': binascii.hexlify(self.configuration_hash()).decode()
-                }
-                json.dump(status, status_file)
+            self.__actualize(project)
+            self.__write_build_status()
+            self.__cache_artifacts()
 
         return True
+
+    def __post_clean(self):
+        configuration = self.project_configuration()
+        post_clean_commands = configuration['post-clean'] if 'post-clean' in configuration else []
+        with cd(self.project_root()):
+            for cmd in self.evaluate(post_clean_commands):
+                command(cmd)
+
+    def __actualize(self, project):
+        build_directory = self.build_directory()
+        with cd(self.project_root()):
+            try:
+                project.setup()
+                project.configure(build_directory)
+                project.pre_build(build_directory)
+                project.build(build_directory)
+                project.post_build(build_directory)
+                if not os.path.exists(os.path.join(build_directory, 'lib', 'pkgconfig')):
+                    self.generate_pkgconfig(build_directory, self.name())
+            except:
+                shutil.rmtree(build_directory)
+                raise
+
+    def __write_build_status(self):
+        with open(self.build_status_path(), 'w') as status_file:
+            status = {
+                'configuration': binascii.hexlify(self.configuration_hash()).decode()
+            }
+            json.dump(status, status_file)
+
+    def __cache_artifacts(self):
+        if self.__build_caches:
+            try:
+                self.__build_caches[0].store_artifacts(self.build_directory(), self.__cache_key())
+            except:
+                pass
+
+    def __load_cached_artifacts(self):
+        '''Returns True if there is a cache and it was able to load artifacts'''
+        for c in self.__build_caches:
+            try:
+                c.load_artifacts(self.__cache_key(), self.build_directory())
+                return True
+            except:
+                pass
+        return False
+
+    def __cache_key(self):
+        configuration_hash = binascii.hexlify(self.configuration_hash()).decode()
+        path = os.path.relpath(self.build_directory(), self.needy.needs_directory())
+        return os.path.join(path, configuration_hash)
 
     def __parse_env_overrides(self, overrides):
         if overrides is None:
@@ -162,11 +205,14 @@ class Library:
     def __log_env_overrides(self, env_overrides, verbosity=logging.DEBUG):
         if env_overrides is not None and len(env_overrides) > 0:
             logging.log(verbosity, 'Overriding environment with new variables:')
-            for k, v in env_overrides.iteritems():
+            for k, v in env_overrides.items():
                 logging.log(verbosity, '{}={}'.format(k, v))
 
+    def is_in_development_mode(self):
+        return self.__development_mode
+
     def has_up_to_date_build(self):
-        if self.needy.parameters().force_build or not os.path.isfile(self.build_status_path()) or self.__development_mode:
+        if self.needy.parameters().force_build or not os.path.isfile(self.build_status_path()) or self.is_in_development_mode():
             return False
         with open(self.build_status_path(), 'r') as status_file:
             status_text = status_file.read()
@@ -234,18 +280,24 @@ class Library:
 
         raise RuntimeError('unknown project type')
 
+    @classmethod
+    def build_compatibility(cls):
+        return 3
+
     def configuration_hash(self):
         hash = hashlib.sha256()
-
-        top = self.__configuration.copy()
-        top.pop('project', None)
-        hash.update(json.dumps(top, sort_keys=True).encode())
-
-        hash.update(json.dumps(self.project_configuration(), sort_keys=True).encode())
 
         platform_configuration_hash = self.target().platform.configuration_hash(self.target().architecture)
         if platform_configuration_hash:
             hash.update(platform_configuration_hash)
+
+        configuration = self.__configuration.copy()
+        configuration['project'] = self.project_configuration()
+
+        hash.update(json.dumps({
+            'build-compatibility': self.build_compatibility(),
+            'configuration': configuration,
+        }, sort_keys=True).encode())
 
         return hash.digest()
 
@@ -277,7 +329,7 @@ class Library:
                 with open(pc_path, 'w') as f:
                     f.write(textwrap.dedent("""\
                         # This file was automatically generated by Needy.
-                        prefix={prefix}
+                        prefix=${{pcfiledir}}/../..
                         exec_prefix=${{prefix}}
                         libdir=${{exec_prefix}}/lib
                         includedir=${{prefix}}/include
@@ -287,4 +339,4 @@ class Library:
                         Description: {name}
                         Libs: -L${{libdir}} {lflags}
                         Cflags: -I${{includedir}}
-                    """.format(prefix=prefix, name=name, version=0, lflags=' '.join([('-l'+lib_name) for lib_name in libs]))))
+                    """.format(name=name, version=0, lflags=' '.join([('-l'+lib_name) for lib_name in libs]))))

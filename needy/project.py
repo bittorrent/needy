@@ -101,24 +101,26 @@ class Project:
     def target_environment_overrides(self):
         ret = {}
 
+        needy_wrappers = os.path.join(self.directory(), 'needy-wrappers')
+
         if 'CC' in os.environ:
-            ret['HOST_CC'] = os.environ['CC']
+            ret['HOST_CC'] = os.environ.get('HOST_CC', os.environ['CC'])
         if self.target().platform.c_compiler(self.target().architecture):
-            ret['CC'] = 'needy-cc'
+            ret['CC'] = os.path.join(needy_wrappers, 'needy-cc')
 
         if 'CXX' in os.environ:
-            ret['HOST_CXX'] = os.environ['CXX']
+            ret['HOST_CXX'] = os.environ.get('HOST_CXX', os.environ['CXX'])
         if self.target().platform.cxx_compiler(self.target().architecture):
-            ret['CXX'] = 'needy-cxx'
+            ret['CXX'] = os.path.join(needy_wrappers, 'needy-cxx')
 
         if 'LDFLAGS' in os.environ:
-            ret['HOST_LDFLAGS'] = os.environ['LDFLAGS']
+            ret['HOST_LDFLAGS'] = os.environ.get('HOST_LDFLAGS', os.environ['LDFLAGS'])
         libraries = self.target().platform.libraries(self.target().architecture)
         if len(libraries) > 0:
             ret['LDFLAGS'] = ' '.join(libraries + ([os.environ['LDFLAGS']] if 'LDFLAGS' in os.environ else []))
 
-        ret['HOST_PATH'] = os.environ['PATH']
-        binary_paths = [os.path.join(self.directory(), 'needy-wrappers')] + self.target().platform.binary_paths(self.target().architecture)
+        ret['HOST_PATH'] = os.environ.get('HOST_PATH', os.environ['PATH'])
+        binary_paths = [needy_wrappers] + self.target().platform.binary_paths(self.target().architecture)
         if len(binary_paths) > 0:
             ret['PATH'] = ('%s:%s' % (':'.join(binary_paths), os.environ['PATH']))
 
@@ -126,14 +128,16 @@ class Project:
 
     def setup(self):
         # create wrappers for cc / cxx since some systems (e.g. boost's bootstrap) expect these to be single tokens
-
         c_compiler = self.target().platform.c_compiler(self.target().architecture)
         if c_compiler:
             self.__create_wrapper('needy-cc', c_compiler)
-
         cxx_compiler = self.target().platform.cxx_compiler(self.target().architecture)
         if cxx_compiler:
             self.__create_wrapper('needy-cxx', cxx_compiler)
+
+        # prefer to stick within the version of python we were invoked with
+        if sys.executable:
+            self.__create_wrapper('python', sys.executable)
 
     def pre_build(self, output_directory):
         build_dirs = [os.path.join(output_directory, d) for d in ['include', 'lib']]
@@ -164,6 +168,10 @@ class Project:
         env = environment_overrides.copy()
         if use_target_overrides:
             env.update(self.target_environment_overrides())
+        else:
+            for var in ['PATH', 'CC', 'CXX', 'LDFLAGS']:
+                if 'HOST_'+var in os.environ:
+                    env[var] = os.environ['HOST_'+var]
         command(cmd, environment_overrides=env)
 
     def command_output(self, arguments, verbosity=logging.INFO, environment_overrides={}):

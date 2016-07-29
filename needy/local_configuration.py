@@ -1,7 +1,10 @@
-import fcntl
+from __future__ import print_function
+
 import json
 import os
 import sys
+
+from .filesystem import lock_fd, os_file
 
 
 class LocalConfiguration:
@@ -21,26 +24,28 @@ class LocalConfiguration:
                 if not os.path.exists(directory):
                     raise e
 
-        self.__fd = os.open(self.__path, os.O_RDWR | os.O_CREAT)
-        try:
-            fcntl.flock(self.__fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except IOError:
-            if not self.__blocking:
-                return None
-            print('Waiting for other needy instances to terminate...')
-            fcntl.flock(self.__fd, fcntl.LOCK_EX)
+        self.__file = os_file(self.__path, os.O_RDWR | os.O_CREAT, 'r+')
 
-        with open(self.__path, 'rt') as f:
-            contents = f.read()
-            if contents:
-                self.__configuration = json.loads(contents)
+        if not lock_fd(self.__file.fileno(), timeout=0):
+            if not self.__blocking:
+                self.__file.close()
+                self.__file = None
+                return None
+            print('Waiting for other needy instances to terminate...', file=sys.stderr)
+            lock_fd(self.__file.fileno())
+
+        contents = self.__file.read()
+        if contents:
+            self.__configuration = json.loads(contents)
 
         return self
 
     def __exit__(self, etype, value, traceback):
-        with open(self.__path, 'wt') as f:
-            json.dump(self.__configuration, f)
-        os.close(self.__fd)
+        if self.__file:
+            self.__file.seek(0)
+            self.__file.write(json.dumps(self.__configuration))
+            self.__file.truncate()
+            self.__file.close()
 
     def development_mode(self, library_name):
         return self.__library_configuration(library_name, 'development_mode', False)

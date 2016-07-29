@@ -6,10 +6,23 @@ import os
 import sys
 import logging
 
+from contextlib import contextmanager
+
 from .needy import Needy
 from .local_configuration import LocalConfiguration
 from .platform import available_platforms
 from .generator import available_generators
+from .caches.directory import Directory
+from .needy_configuration import NeedyConfiguration
+
+
+@contextmanager
+def __configured_needy(scope, parameters=None):
+    needs_directory = Needy.resolve_needs_directory(scope)
+    if needs_directory is None:
+        raise RuntimeError('No needs file found!')
+    with LocalConfiguration(os.path.join(needs_directory, 'config.json')) as local_configuration:
+        yield Needy(scope, parameters, local_configuration=local_configuration, needy_configuration=NeedyConfiguration(scope))
 
 
 def satisfy(args=[]):
@@ -57,8 +70,7 @@ def satisfy(args=[]):
 
     logging.basicConfig(format=('%(message)s'), level=logging.DEBUG if parameters.verbose else logging.INFO)
 
-    with LocalConfiguration(os.path.join(Needy.resolve_needs_directory('.'), 'config.json')) as local_configuration:
-        needy = Needy('.', parameters, local_configuration=local_configuration)
+    with __configured_needy('.', parameters) as needy:
         if parameters.universal_binary:
             needy.satisfy_universal_binary(parameters.universal_binary, parameters.library)
         else:
@@ -82,8 +94,7 @@ def cflags(args=[]):
     parser.add_argument('-u', '--universal-binary', help='gets flags for this universal binary')
     parameters = parser.parse_args(args)
 
-    with LocalConfiguration(os.path.join(Needy.resolve_needs_directory('.'), 'config.json')) as local_configuration:
-        needy = Needy('.', parameters, local_configuration=local_configuration)
+    with __configured_needy('.', parameters) as needy:
         print(' '.join([('-I%s' % path) for path in needy.include_paths(
             parameters.universal_binary if parameters.universal_binary else needy.target(parameters.target), parameters.library)]), end='')
 
@@ -105,8 +116,7 @@ def ldflags(args=[]):
     parser.add_argument('-u', '--universal-binary', help='gets flags for this universal binary')
     parameters = parser.parse_args(args)
 
-    with LocalConfiguration(os.path.join(Needy.resolve_needs_directory('.'), 'config.json')) as local_configuration:
-        needy = Needy('.', parameters, local_configuration=local_configuration)
+    with __configured_needy('.', parameters) as needy:
         print(' '.join([('-L%s' % path) for path in needy.library_paths(
             parameters.universal_binary if parameters.universal_binary else needy.target(parameters.target), parameters.library)]), end='')
 
@@ -125,8 +135,7 @@ def builddir(args=[]):
     parser.add_argument('-u', '--universal-binary', help='gets the directory for this universal binary')
     parameters = parser.parse_args(args)
 
-    with LocalConfiguration(os.path.join(Needy.resolve_needs_directory('.'), 'config.json')) as local_configuration:
-        needy = Needy('.', parameters, local_configuration=local_configuration)
+    with __configured_needy('.', parameters) as needy:
         print(needy.build_directory(parameters.library,
                                     parameters.universal_binary if parameters.universal_binary else needy.target(parameters.target)), end='')
 
@@ -142,8 +151,7 @@ def sourcedir(args=[]):
     parser.add_argument('library', help='the library to get the directory for')
     parameters = parser.parse_args(args)
 
-    with LocalConfiguration(os.path.join(Needy.resolve_needs_directory('.'), 'config.json')) as local_configuration:
-        needy = Needy('.', parameters, local_configuration=local_configuration)
+    with __configured_needy('.', parameters) as needy:
         print(needy.source_directory(parameters.library), end='')
 
     return 0
@@ -168,8 +176,7 @@ def generate(args=[]):
         help='arguments to use when satisfying needs')
     parameters = parser.parse_args(args)
 
-    with LocalConfiguration(os.path.join(Needy.resolve_needs_directory('.'), 'config.json')) as local_configuration:
-        needy = Needy('.', parameters, local_configuration=local_configuration)
+    with __configured_needy('.', parameters) as needy:
         needy.generate(parameters.file)
 
     return 0
@@ -196,8 +203,7 @@ def development_mode(args=[]):
         help='if given, will return 0 if dev-mode is enabled, or 1 otherwise')
     parameters = parser.parse_args(args)
 
-    with LocalConfiguration(os.path.join(Needy.resolve_needs_directory('.'), 'config.json')) as local_configuration:
-        needy = Needy('.', parameters, local_configuration=local_configuration)
+    with __configured_needy('.', parameters) as needy:
         if parameters.query:
             return 0 if needy.development_mode(parameters.library) else 1
         needy.set_development_mode(parameters.library, not parameters.disable)
@@ -220,8 +226,7 @@ def pkg_config_path(args=[]):
     parser.add_argument('-u', '--universal-binary', help='gets flags for this universal binary')
     parameters = parser.parse_args(args)
 
-    with LocalConfiguration(os.path.join(Needy.resolve_needs_directory('.'), 'config.json')) as local_configuration:
-        needy = Needy('.', parameters, local_configuration=local_configuration)
+    with __configured_needy('.', parameters) as needy:
         print(needy.pkg_config_path(parameters.universal_binary if parameters.universal_binary else needy.target(parameters.target), parameters.library), end='')
 
     return 0
@@ -238,13 +243,14 @@ def main(args=sys.argv):
         description='Helps with dependencies.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""available commands:
-  satisfy     satisfies libraries / universal binary needs
-  cflags      emits the compiler flags required to use the satisfied needs
-  ldflags     emits the linker flags required to use the satisfied needs
-  builddir    emits the build directory for a need
-  sourcedir   emits the source directory for a need
-  generate    generates useful files
-  dev-mode    enables development mode for a library
+  satisfy          satisfies libraries / universal binary needs
+  cflags           emits the compiler flags required to use the satisfied needs
+  ldflags          emits the linker flags required to use the satisfied needs
+  builddir         emits the build directory for a need
+  sourcedir        emits the source directory for a need
+  pkg-config-path  emits the pkg-config path for a need
+  generate         generates useful files
+  dev-mode         enables development mode for a library
 
 Use '%s <command> --help' to get help for a specific command.
 """ % os.path.basename(sys.argv[0])
@@ -259,9 +265,9 @@ Use '%s <command> --help' to get help for a specific command.
         'ldflags': ldflags,
         'builddir': builddir,
         'sourcedir': sourcedir,
+        'pkg-config-path': pkg_config_path,
         'generate': generate,
         'dev-mode': development_mode,
-        'pkg-config-path': pkg_config_path,
     }
 
     try:

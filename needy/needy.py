@@ -138,6 +138,7 @@ class Needy:
                         env.globals[parts[0]] = value
             template = env.from_string(configuration)
             configuration = template.render(
+                env=os.environ,
                 platform=target.platform.identifier() if target else None,
                 architecture=target.architecture if target else None,
                 host_platform=host_platform().identifier(),
@@ -203,6 +204,9 @@ class Needy:
             if fnmatch.fnmatchcase(name, filter):
                 return True
         return False
+
+    def library_configuration(self, target, name):
+        return self.needs_configuration(target)['libraries'][name] if name in self.needs_configuration(target)['libraries'] else None
 
     def libraries_to_build(self, target, filters=None):
         needs_configuration = self.needs_configuration(target)

@@ -3,6 +3,7 @@ import shutil
 import time
 
 from ..cache import Cache, KeyLocked, SourceNotFound, KeyNotFound
+from .. import filesystem
 from ..filesystem import clean_file, lock_fd, os_file
 
 
@@ -81,10 +82,10 @@ class Directory(Cache):
         if create:
             try:
                 os.makedirs(os.path.dirname(self.__archive_path(key)))
-            except:
+            except os.error:
                 pass
 
-        f = os_file(self.__archive_path(key), os.O_RDWR | os.O_CREAT, 'r+b')
+        f = os_file(self.__archive_path(key), os.O_RDWR | os.O_CREAT | filesystem.O_BINARY, 'r+b')
 
         if lock_fd(f.fileno(), timeout):
             self.__locks[key] = f

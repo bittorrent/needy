@@ -6,8 +6,6 @@ import shutil
 import subprocess
 import tempfile
 
-from .process import command
-
 
 class UniversalBinary:
     def __init__(self, name, libraries, needy):
@@ -84,29 +82,11 @@ class UniversalBinary:
 
                 self.__make_output_dirs_for_builds(output_path, builds)
 
-                if any([os.path.isdir(source_path) for _, source_path in builds]):
+                if not os.path.islink(builds[0][1]) and any([os.path.isdir(source_path) for _, source_path in builds]):
                     continue
-
-                if len(self.libraries()) == 1:
+                elif not os.path.islink(builds[0][1]) and len(self.libraries()) == 1:
                     print('Copying %s' % path)
-                    source_path = builds[0][1]
-                    if os.path.islink(source_path):
-                        os.symlink(os.readlink(source_path), output_path)
-                    else:
-                        shutil.copy(source_path, output_path)
-                elif extension in ['.a', '.dylib', '.so']:
-                    print('Creating universal library %s' % path)
-                    inputs = []
-                    for library, lib in builds:
-                        f = tempfile.NamedTemporaryFile(delete=True)
-                        try:
-                            command(['lipo', '-extract', library.target().architecture, lib, '-output', f.name])
-                        except subprocess.CalledProcessError:
-                            command(['cp', lib, f.name])
-                        inputs.append(f)
-                    command(['lipo', '-create'] + [input.name for input in inputs] + ['-output', output_path])
-                    for input in inputs:
-                        input.close()
+                    shutil.copy(builds[0][1], output_path)
                 elif extension in ['.h', '.hpp', '.ipp', '.c', '.cc', '.cpp']:
                     header_contents = '#if __APPLE__\n#include "TargetConditionals.h"\n#endif\n'
                     for library, header in builds:
@@ -124,12 +104,29 @@ class UniversalBinary:
                         print('Creating universal header %s' % path)
                         with open(output_path, 'w') as f:
                             f.write(header_contents)
+                elif os.path.islink(builds[0][1]):
+                    print('Copying symlink %s' % path)
+                    os.symlink(os.readlink(builds[0][1]), output_path)
+                elif extension in ['.a', '.dylib', '.so']:
+                    print('Creating universal library %s' % path)
+                    inputs = []
+                    for library, lib in builds:
+                        f = tempfile.NamedTemporaryFile(delete=True)
+                        try:
+                            with open(os.devnull, 'w') as devnull:
+                                subprocess.check_call(['lipo', '-extract', library.target().architecture, lib, '-output', f.name], stderr=devnull)
+                        except subprocess.CalledProcessError:
+                            subprocess.check_call(['cp', lib, f.name])
+                        inputs.append(f)
+                    subprocess.check_call(['lipo', '-create'] + [input.name for input in inputs] + ['-output', output_path])
+                    for input in inputs:
+                        input.close()
                 elif extension == '.pc' and 'pkgconfig' in path:
                     universal_pc = None
                     for library, pc in builds:
                         with open(pc, 'r') as f:
                             contents = f.read().decode()
-                            fixed = contents.replace(library.build_directory(), directory)
+                            fixed = contents.replace(library.build_directory(), '${pcfiledir}/../..')
                             if universal_pc is not None and fixed != universal_pc:
                                 print('Package config differs beyond prefix. Not creating %s' % path)
                                 universal_pc = None
@@ -151,14 +148,22 @@ class UniversalBinary:
 
     def __make_output_dirs_for_builds(self, output_path, builds):
         for _, source_dir in builds:
-            dir = output_path if os.path.isdir(source_dir) else os.path.dirname(output_path)
+            dir = output_path if os.path.isdir(source_dir) and not os.path.islink(source_dir) else os.path.dirname(output_path)
             if not os.path.exists(dir):
                 os.makedirs(dir)
+
+    @classmethod
+    def build_compatibility(cls):
+        return 1
 
     def configuration_hash(self):
         hash = hashlib.sha256()
 
         for library in self.libraries():
             hash.update(library.configuration_hash())
+
+        hash.update(json.dumps({
+            'build-compatibility': self.build_compatibility()
+        }, sort_keys=True).encode())
 
         return hash.digest()
